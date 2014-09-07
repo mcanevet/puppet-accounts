@@ -5,11 +5,9 @@ class accounts(
   $users                   = {},
   $usergroups              = {},
   $accounts                = {},
-  $start_uid               = undef,
-  $start_gid               = undef,
-  $ssh_authorized_key_title = '%{ssh_key}-on-%{account}',
+  $target_format           = undef,
+  $key_comment_format      = undef,
 ) {
-  include ::accounts::config
 
   create_resources(group, $groups)
 

@@ -4,8 +4,8 @@ define accounts::account(
   $user                     = $name,
   $groups                   = [],
   $authorized_keys          = [],
-  $authorized_keys_target   = undef,
-  $ssh_authorized_key_title = $::accounts::ssh_authorized_key_title,
+  $target_format            = $::accounts::target_format,
+  $key_comment_format       = $::accounts::key_comment_format,
 ) {
   if $user =~ /^@(\S+)$/ {
     if ! has_key($::accounts::usergroups, $1) {
@@ -18,79 +18,91 @@ define accounts::account(
         ensure                   => $ensure,
         groups                   => $groups,
         authorized_keys          => $authorized_keys,
-        ssh_authorized_key_title => $ssh_authorized_key_title,
+        target_format            => $target_format,
+        key_comment_format       => $key_comment_format,
       }
     )
   } else {
-    if has_key($::accounts::users, $user) {
-      ensure_resource(
-        user,
-        $name,
-        merge(
-          $::accounts::users[$name],
-          {
-            ensure     => $ensure,
-            groups     => $groups,
-            managehome => true,
-          }
-        )
-      )
+    # Retrieve $ssh_keys and $users in the current scope
+    $ssh_keys = $::accounts::ssh_keys
+    $users    = $::accounts::users
+
+    $_target = strformat($target_format) ? {
+      ''      => undef,
+      default => strformat($target_format),
     }
 
     if $ensure != absent {
-      if is_string($authorized_keys) or is_array($authorized_keys) {
-        $_authorized_keys = suffix(
-          unique( delete_undef_values( flatten( [$authorized_keys, $name] ) ) ),
-          "-on-${name}"
+      if has_key($users, $user) {
+        ensure_resource(
+          user,
+          $user,
+          merge(
+            $users[$user],
+            {
+              ensure     => $ensure,
+              groups     => $groups,
+              managehome => true,
+            }
+          )
         )
-        accounts::authorized_key { $_authorized_keys:
-          account                  => $name,
-          target                   => $authorized_keys_target,
-          ssh_authorized_key_title => $ssh_authorized_key_title,
+      }
+
+      if has_key($ssh_keys, $user) {
+        if is_string($authorized_keys) {
+          $_authorized_keys = unique(concat([$authorized_keys], $user))
+        } elsif is_array($authorized_keys) {
+          $_authorized_keys = unique(concat($authorized_keys, $user))
+        } elsif is_hash($authorized_keys) {
+          $_authorized_keys = merge({ "${user}" => {}}, $authorized_keys)
+        } else {
+          $_authorized_keys = $authorized_keys
         }
-      } elsif is_hash($authorized_keys) {
-        $tmp_hash = merge({"${name}" => {},}, $authorized_keys)
-        $_authorized_keys = hash(
-          zip(suffix(keys($tmp_hash), "-on-${name}"), values($tmp_hash))
-        )
-        create_resources(
-          accounts::authorized_key,
-          $_authorized_keys,
-          {
-            target                   => $authorized_keys_target,
-            ssh_authorized_key_title => $ssh_authorized_key_title,
+        if has_key($ssh_keys[$user], 'private') {
+          # NOTE: getparam(User[$user], 'home') would do the trick to fetch
+          # user's home dir, but it depends on parsing order
+          #
+          # $home = getparam(User[$user], 'home')
+          # file { "${home}/.ssh/id_rsa":
+          #   content => $ssh_keys[$user]['private'],
+          # }
+          #
+          # Another solution would be to use puppetdbquery:
+          #
+          # $ret = query_resources("fqdn='${::fqdn}'", "User['${user}']")
+          # $home = $ret[$::fqdn][0]['parameters']['home']
+          #
+          # TODO: Fix unless so that it replaces the key
+          exec { "/bin/echo '${ssh_keys[$user]['private']}' > ~${user}/.ssh/id_rsa":
+            unless => "/usr/bin/test -f ~${user}/.ssh/id_rsa",
           }
-        )
-      } else {
-        fail 'authorized_keys must be a String, an Array or a Hash'
-      }
-      if $::accounts::ssh_keys[$name] != undef and $::accounts::ssh_keys[$name]['private'] != undef {
-        # NOTE: getparam(User[$user], 'home') would do the trick to fetch
-        # user's home dir, but it depends on parsing order
-        #
-        # $home = getparam(User[$user], 'home')
-        # file { "${home}/.ssh/id_rsa":
-        #   content => $::accounts::ssh_keys[$name]['private'],
-        # }
-        #
-        # Another solution would be to use puppetdbquery:
-        #
-        # $ret = query_resources("fqdn='${::fqdn}'", "User['${user}']")
-        # $home = $ret[$::fqdn][0]['parameters']['home']
-        #
-        # TODO: Fix unless so that it replaces the key
-        exec { "/bin/echo '${::accounts::ssh_keys[$name]['private']}' > ~${user}/.ssh/id_rsa":
-          unless => "/usr/bin/test -f ~${user}/.ssh/id_rsa",
         }
+      } else {
+        $_authorized_keys = $authorized_keys
       }
+
+      create_resources(
+        accounts::authorized_key,
+        build_accounts_authorized_keys_hash( $_authorized_keys, $user ),
+        {
+          account => $user,
+          target  => $_target,
+        }
+      )
     }
 
-    $keys_to_remove = suffix(keys(absents($::accounts::ssh_keys)), "-on-${name}")
-    accounts::authorized_key { $keys_to_remove:
-      ensure                   => absent,
-      account                  => $name,
-      target                   => $authorized_keys_target,
-      ssh_authorized_key_title => $ssh_authorized_key_title,
-    }
+    # TODO: Use class user's purge parameter instead
+    create_resources(
+      accounts::authorized_key,
+      build_accounts_authorized_keys_hash(
+        keys(absents($ssh_keys)),
+        $user
+      ),
+      {
+        account => $user,
+        target  => $_target,
+      }
+    )
+
   }
 }
